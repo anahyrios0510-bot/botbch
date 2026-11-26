@@ -1,49 +1,44 @@
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys')
-const pino = require('pino')
 const fs = require('fs')
-const path = require('path')
+const pino = require('pino')
+const qrcode = require('qrcode-terminal')
+const express = require('express')
+
+const app = express()
+app.get('/', (req, res) => res.send('Bot BCH activo ✅'))
+app.listen(process.env.PORT || 3000, () => console.log('Web activa'))
 
 async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState('session')
+  const { state, saveCreds } = await useMultiFileAuthState('auth')
   const sock = makeWASocket({ auth: state, logger: pino({ level: 'silent' }) })
   sock.ev.on('creds.update', saveCreds)
 
-  if (!state.creds.registered) {
-    setTimeout(async () => {
-      try {
-        const phone = process.env.PHONE_NUMBER
-        if (!phone) return console.log('Pon la variable PHONE_NUMBER en Railway')
-        const code = await sock.requestPairingCode(phone)
-        console.log('TU CODIGO ES: ' + code)
-      } catch(e) { console.log(e) }
-    }, 3000)
-  }
-
   sock.ev.on('connection.update', (u) => {
-    if (u.connection === 'open') console.log('BOT CONECTADO ✅')
-    if (u.connection === 'close' && u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) start()
+    const { connection, lastDisconnect, qr } = u
+    if (qr) qrcode.generate(qr, { small: true })
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+      if (shouldReconnect) start()
+    }
   })
-
-  const comandos = {}
-  const carpeta = path.join(__dirname, 'comandos')
-  if (fs.existsSync(carpeta)) {
-    fs.readdirSync(carpeta).forEach(f => {
-      if (!f.endsWith('.js')) return
-      const cmd = require(path.join(carpeta, f))
-      comandos[cmd.name] = cmd
-    })
-  }
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0]
     if (!m.message || m.key.fromMe) return
-    const text = m.message.conversation || m.message.extendedTextMessage?.text || ''
-    if (!text.startsWith('.')) return
-    const args = text.slice(1).trim().split(' ')
-    const name = args.shift().toLowerCase()
     const from = m.key.remoteJid
-    if (comandos[name]) {
-      try { await comandos[name].run(sock, m, args, from) } catch(e) { console.log(e) }
+    const texto = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || ''
+    if (!texto.startsWith('.') && !texto.startsWith('#')) return
+    const args = texto.slice(1).trim().split(/ +/)
+    const cmd = args.shift().toLowerCase()
+
+    const archivos = fs.readdirSync('./Comandos')
+    for (const archivo of archivos) {
+      if (!archivo.endsWith('.js')) continue
+      const comando = require(`./Comandos/${archivo}`)
+      if (comando.name === cmd) {
+        try { await comando.run(sock, m, args, from) } catch (e) { console.log(e) }
+      }
     }
   })
 }
